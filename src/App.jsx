@@ -1,209 +1,169 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
-import viteLogo from "/vite.svg";
+import { useEffect, useState } from "react";
+import * as signalR from "@microsoft/signalr";
 import "./App.css";
 import { useRef } from "react";
+import { Snackbar } from "@mui/material";
 
 function App() {
-  const [localStream, setLocalStream] = useState();
-  const [startTime, setStartTime] = useState();
+  const [ready, setReady] = useState();
+  const [remoteReady, setRemoteReady] = useState();
+  const [currentCall, setCurrentCall] = useState();
+  const [message, setMessage] = useState();
+  const localStream = useRef();
   const localVideo = useRef();
+  const remoteVideo = useRef();
 
-  const localPeer = useRef();
-  const remotePeer = useRef();
+  const pc = useRef();
+  const hub = useRef(
+    new signalR.HubConnectionBuilder()
+      .withUrl("https://mnordberg-rtc-demo.azurewebsites.net/hub")
+      .withAutomaticReconnect()
+      .configureLogging(signalR.LogLevel.Debug)
+      .build()
+  );
+
+  useEffect(() => {
+    if (hub.current.state == "Disconnected") {
+      hub.current.start();
+
+      // Message needs to be parsed since we're using SignalR with Json
+      hub.current.on("Message", (e) => handleMessage(JSON.parse(e)));
+    }
+  }, []);
+
+  function handleMessage(e) {
+    if (e.connectionId == hub.current.connectionId) {
+      return;
+    }
+    switch (e.type) {
+      case "offer":
+        handleOffer(e.data);
+        break;
+      case "answer":
+        handleAnswer(e.data);
+        break;
+      case "candidate":
+        handleCandidate(e.data);
+        break;
+      case "ready":
+        handleReady();
+        break;
+      case "end":
+        end(false);
+        break;
+      default:
+        handleError(`Unhandled event: ${e.type}`);
+        break;
+    }
+  }
 
   async function start() {
-    console.log("Requesting local stream");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: true,
-      });
-      console.log("Received local stream");
-      setLocalStream(stream);
-      localVideo.current.srcObject = stream;
-    } catch (e) {
-      alert(`${e.message || e.name}`);
+    localStream.current = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: true,
+    });
+    localVideo.current.srcObject = localStream.current;
+    setReady(true);
+    sendMessage("ready");
+  }
+
+  async function end(notify) {
+    if (pc.current) {
+      pc.current.close();
+      pc.current = null;
     }
+    localStream.current.getTracks().forEach((track) => track.stop());
+    localStream.current = null;
+    localVideo.current.srcObject = null;
+    remoteVideo.current.srcObject = null;
+    setCurrentCall(false);
+    if (notify) {
+      sendMessage("end");
+    }
+  }
+
+  function createPeerConnection() {
+    pc.current = new RTCPeerConnection();
+    pc.current.onicecandidate = (e) => {
+      sendMessage("candidate", e.candidate || null);
+    };
+    pc.current.ontrack = (e) => (remoteVideo.current.srcObject = e.streams[0]);
+    if (!localStream.current) {
+      handleError("Local stream not ready");
+    }
+    localStream.current
+      .getTracks()
+      .forEach((track) => pc.current.addTrack(track, localStream.current));
   }
 
   async function call() {
-    console.log("Starting call");
-    setStartTime(window.performance.now());
-    const videoTracks = localStream.getVideoTracks();
-    const audioTracks = localStream.getAudioTracks();
-    if (videoTracks.length > 0) {
-      console.log(`Using video device: ${videoTracks[0].label}`);
-    }
-    if (audioTracks.length > 0) {
-      console.log(`Using audio device: ${audioTracks[0].label}`);
-    }
-    const iceConfiguration = {
-      iceServers: [
-        {
-          urls: "turn:20.64.146.240:3478",
-          username: "test",
-          credential: "test123",
-        },
-      ],
-    };
-    console.log("RTCPeerConnection configuration:", iceConfiguration);
-    localPeer.current = new RTCPeerConnection(iceConfiguration);
-    localPeer.current.addEventListener("icecandidate", (e) =>
-      onIceCandidate(localPeer.current, e)
-    );
-    localPeer.current.addEventListener("iceconnectionstatechange", (e) =>
-      onIceStateChange(localPeer.current, e)
-    );
-    remotePeer.current = new RTCPeerConnection(iceConfiguration);
-    remotePeer.current.addEventListener("icecandidate", (e) =>
-      onIceCandidate(remotePeer.current, e)
-    );
-    remotePeer.current.addEventListener("iceconnectionstatechange", (e) =>
-      onIceStateChange(remotePeer.current, e)
-    );
-    remotePeer.current.addEventListener("track", gotRemoteStream);
-    localStream
-      .getTracks()
-      .forEach((track) => localPeer.current.addTrack(track, localStream));
-    console.log("Added local stream to local peer");
+    await createPeerConnection();
 
-    try {
-      console.log("Local peer: createOffer start");
-      const offer = await localPeer.current.createOffer({
-        offerToReceiveAudio: 1,
-        offerToReceiveVideo: 1,
-      });
-      await onCreateOfferSuccess(offer);
-    } catch (e) {
-      onCreateSessionDescriptionError(e);
+    const offer = await pc.current.createOffer();
+    sendMessage("offer", offer);
+    await pc.current.setLocalDescription(offer);
+  }
+
+  async function handleOffer(offer) {
+    if (pc.current) {
+      handleError("Cannot connect when existing peer connection is in place.");
+      return;
+    }
+    await createPeerConnection();
+    await pc.current.setRemoteDescription(offer);
+
+    const answer = await pc.current.createAnswer();
+    sendMessage("answer", answer);
+    await pc.current.setLocalDescription(answer);
+    setCurrentCall(true);
+  }
+
+  async function handleAnswer(answer) {
+    if (!pc.current) {
+      handleError("Cannot handle answer. No peer connection is in place.");
+      return;
+    }
+    await pc.current.setRemoteDescription(answer);
+    setCurrentCall(true);
+  }
+
+  async function handleCandidate(candidate) {
+    if (!pc.current) {
+      handleError("Cannot handle candidate. No peer connection is in place.");
+      return;
+    }
+    if (!candidate?.candidate) {
+      await pc.current.addIceCandidate(null);
+    } else {
+      await pc.current.addIceCandidate(candidate);
     }
   }
 
-  function onCreateSessionDescriptionError(error) {
-    console.log(`Failed to create session description: ${error.toString()}`);
+  async function handleReady() {
+    setRemoteReady(true);
   }
 
-  function onSetSessionDescriptionError(error) {
-    console.log(`Failed to set session description: ${error.toString()}`);
+  function test() {
+    sendMessage("test");
   }
 
-  async function onCreateOfferSuccess(desc) {
-    console.log(`Offer from local peer\n${desc.sdp}`);
-    console.log("Local peer setLocalDescription start");
-    try {
-      await localPeer.current.setLocalDescription(desc);
-      onSetLocalSuccess(localPeer.current);
-    } catch (e) {
-      onSetSessionDescriptionError();
-    }
-
-    console.log("Remote peer setRemoteDescription start");
-    try {
-      await remotePeer.current.setRemoteDescription(desc);
-      onSetRemoteSuccess(remotePeer.current);
-    } catch (e) {
-      onSetSessionDescriptionError();
-    }
-
-    console.log("Remote peer createAnswer start");
-    // Since the 'remote' side has no media stream we need
-    // to pass in the right constraints in order for it to
-    // accept the incoming offer of audio and video.
-    try {
-      const answer = await remotePeer.current.createAnswer();
-      await onCreateAnswerSuccess(answer);
-    } catch (e) {
-      onCreateSessionDescriptionError(e);
-    }
+  async function sendMessage(type, data) {
+    hub.current.send("Message", {
+      type: type,
+      data: data,
+      connectionId: hub.current.connectionId,
+    });
   }
 
-  function onSetLocalSuccess(peer) {
-    console.log(`${getName(peer)} setLocalDescription complete`);
+  function handleError(error) {
+    console.error(error);
+    popMessage(error);
   }
 
-  function onSetRemoteSuccess(pc) {
-    console.log(`${getName(pc)} setRemoteDescription complete`);
-  }
-
-  async function onIceCandidate(peer, event) {
-    try {
-      await getOtherPeer(peer).addIceCandidate(event.candidate);
-      onAddIceCandidateSuccess(peer);
-    } catch (e) {
-      onAddIceCandidateError(peer, e);
-    }
-    console.log(
-      `${getName(peer)} ICE candidate:\n${
-        event.candidate ? event.candidate.candidate : "(null)"
-      }`
-    );
-  }
-
-  function getName(peer) {
-    return peer === localPeer.current ? "Local peer" : "Remote peer";
-  }
-
-  function getOtherPeer(peer) {
-    return peer === localPeer.current ? remotePeer.current : localPeer.current;
-  }
-
-  function onAddIceCandidateSuccess(peer) {
-    console.log(`${getName(peer)} addIceCandidate success`);
-  }
-
-  function onAddIceCandidateError(peer, error) {
-    console.log(
-      `${getName(peer)} failed to add ICE Candidate: ${error.toString()}`
-    );
-  }
-
-  function gotRemoteStream(e) {
-    if (remoteVideo.srcObject !== e.streams[0]) {
-      remoteVideo.srcObject = e.streams[0];
-      console.log("Added remote stream to remote peer");
-    }
-  }
-
-  async function onCreateAnswerSuccess(desc) {
-    console.log(`Answer from remote peer:\n${desc.sdp}`);
-    console.log("Remote peer setLocalDescription start");
-    try {
-      await remotePeer.current.setLocalDescription(desc);
-      onSetLocalSuccess(remotePeer.current);
-    } catch (e) {
-      onSetSessionDescriptionError(e);
-    }
-    console.log("Local peer setRemoteDescription start");
-    try {
-      await localPeer.current.setRemoteDescription(desc);
-      onSetRemoteSuccess(localPeer.current);
-    } catch (e) {
-      onSetSessionDescriptionError(e);
-    }
-  }
-
-  function onIceStateChange(peer, event) {
-    if (peer) {
-      console.log(`${getName(peer)} ICE state: ${peer.iceConnectionState}`);
-      console.log("ICE state change event: ", event);
-    }
-  }
-
-  function end() {
-    console.log("Ending call and closing local stream");
-    if (localPeer.current) {
-      localPeer.current.close();
-      localPeer.current = null;
-    }
-    if (remotePeer.current) {
-      remotePeer.current.close();
-      remotePeer.current = null;
-    }
-    if (remoteVideo.current) {
-      remoteVideo.current.srcObject = null;
-    }
-    setLocalStream(null);
+  function popMessage(msg) {
+    // Pop a snackbar, then remove the message after the snackbar disappears
+    setMessage(msg);
+    setTimeout(() => setMessage(null), 10000);
   }
 
   return (
@@ -213,27 +173,45 @@ function App() {
         <video
           id="localVideo"
           ref={localVideo}
+          hidden={!ready}
           playsInline
           autoPlay
           muted
         ></video>
-        <video id="remoteVideo" playsInline autoPlay></video>
-        <div style={{ display: "flex", gap: "1rem", justifyContent: "center" }}>
-          <button id="startButton" onClick={start} disabled={!!localStream}>
+        <video
+          id="remoteVideo"
+          ref={remoteVideo}
+          hidden={!remoteReady}
+          playsInline
+          autoPlay
+        ></video>
+        <div
+          style={{
+            display: "flex",
+            gap: "1rem",
+            justifyContent: "center",
+            padding: "1rem",
+          }}
+        >
+          <button id="startButton" onClick={start} disabled={!!ready}>
             Start
           </button>
-          <button id="callButton" onClick={call}>
+          <button
+            id="callButton"
+            onClick={call}
+            disabled={!ready || !remoteReady || currentCall}
+          >
             Call
           </button>
-          <button
-            id="hangupButton"
-            onClick={() => end()}
-            disabled={!localStream}
-          >
+          <button id="endButton" onClick={() => end(true)} disabled={!ready}>
             End
+          </button>
+          <button id="testButton" onClick={() => test()}>
+            Test
           </button>
         </div>
       </div>
+      <Snackbar message={message} open={!!message} autoHideDuration={6000} />
     </>
   );
 }
