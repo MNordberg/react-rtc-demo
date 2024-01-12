@@ -24,6 +24,16 @@ function App() {
       .build()
   );
 
+  const iceConfiguration = {
+    iceServers: [
+      {
+        urls: "turn:20.64.146.240:3478",
+        username: "test",
+        credential: "test123",
+      },
+    ],
+  };
+
   useEffect(() => {
     if (hub.current.state == "Disconnected") {
       hub.current.start();
@@ -69,25 +79,31 @@ function App() {
     sendMessage("ready");
   }
 
-  async function end(notify) {
+  async function end(endedByMe) {
     if (pc.current) {
       pc.current.close();
       pc.current = null;
     }
+
+    remoteVideo.current.srcObject = null;
+    setCurrentCall(false);
+    if (endedByMe) {
+      sendMessage("end");
+    }
+
+    // TODO: allow user to stop as a separate action
+    await stop();
+  }
+
+  async function stop() {
     localStream.current.getTracks().forEach((track) => track.stop());
     localStream.current = null;
     localVideo.current.srcObject = null;
-    remoteVideo.current.srcObject = null;
-    setCurrentCall(false);
     setReady(false);
-    setRemoteReady(false);
-    if (notify) {
-      sendMessage("end");
-    }
   }
 
   function createPeerConnection() {
-    pc.current = new RTCPeerConnection();
+    pc.current = new RTCPeerConnection(iceConfiguration);
     pc.current.onicecandidate = (e) => {
       sendMessage("candidate", e.candidate || null);
     };
@@ -145,6 +161,7 @@ function App() {
       handleError("Cannot handle candidate. No peer connection is in place.");
       return;
     }
+    console.debug(`Adding ICE candidate: \n${candidate?.candidate}`);
     if (!candidate?.candidate) {
       await pc.current.addIceCandidate(null);
     } else {
