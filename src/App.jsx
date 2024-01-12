@@ -7,6 +7,8 @@ import { Snackbar } from "@mui/material";
 function App() {
   const [ready, setReady] = useState();
   const [remoteReady, setRemoteReady] = useState();
+  const [incomingCall, setIncomingCall] = useState();
+  const [outgoingCall, setOutgoingCall] = useState();
   const [currentCall, setCurrentCall] = useState();
   const [message, setMessage] = useState();
   const localStream = useRef();
@@ -77,6 +79,8 @@ function App() {
     localVideo.current.srcObject = null;
     remoteVideo.current.srcObject = null;
     setCurrentCall(false);
+    setReady(false);
+    setRemoteReady(false);
     if (notify) {
       sendMessage("end");
     }
@@ -102,6 +106,15 @@ function App() {
     const offer = await pc.current.createOffer();
     sendMessage("offer", offer);
     await pc.current.setLocalDescription(offer);
+    setOutgoingCall(true);
+  }
+
+  async function answer(offer) {
+    const answer = await pc.current.createAnswer();
+    sendMessage("answer", answer);
+    await pc.current.setLocalDescription(answer);
+    setIncomingCall(false);
+    setCurrentCall(true);
   }
 
   async function handleOffer(offer) {
@@ -111,11 +124,10 @@ function App() {
     }
     await createPeerConnection();
     await pc.current.setRemoteDescription(offer);
+    setIncomingCall(true);
 
-    const answer = await pc.current.createAnswer();
-    sendMessage("answer", answer);
-    await pc.current.setLocalDescription(answer);
-    setCurrentCall(true);
+    // TODO: let user answer manually
+    await answer(offer);
   }
 
   async function handleAnswer(answer) {
@@ -124,6 +136,7 @@ function App() {
       return;
     }
     await pc.current.setRemoteDescription(answer);
+    setOutgoingCall(false);
     setCurrentCall(true);
   }
 
@@ -170,21 +183,44 @@ function App() {
     <>
       <h1>WebRTC + React</h1>
       <div className="card">
-        <video
-          id="localVideo"
-          ref={localVideo}
-          hidden={!ready}
-          playsInline
-          autoPlay
-          muted
-        ></video>
-        <video
-          id="remoteVideo"
-          ref={remoteVideo}
-          hidden={!remoteReady}
-          playsInline
-          autoPlay
-        ></video>
+        <div style={{ position: "relative" }}>
+          <video
+            id="remoteVideo"
+            ref={remoteVideo}
+            hidden={!currentCall}
+            style={{
+              borderRadius: "1rem",
+              width: "60vw",
+            }}
+            playsInline
+            autoPlay
+          ></video>
+          <video
+            id="localVideo"
+            ref={localVideo}
+            hidden={!ready}
+            style={
+              currentCall
+                ? {
+                    borderRadius: "0.6rem",
+                    width: "12vw",
+                    position: "absolute",
+                    right: "-1rem",
+                    bottom: "-1rem",
+                    transition: "all 500ms ease-in-out",
+                  }
+                : {
+                    borderRadius: "1rem",
+                    width: "60vw",
+                    position: "static",
+                    transition: "all 500ms ease-in-out",
+                  }
+            }
+            playsInline
+            autoPlay
+            muted
+          ></video>
+        </div>
         <div
           style={{
             display: "flex",
@@ -199,7 +235,13 @@ function App() {
           <button
             id="callButton"
             onClick={call}
-            disabled={!ready || !remoteReady || currentCall}
+            disabled={
+              !ready ||
+              !remoteReady ||
+              currentCall ||
+              incomingCall ||
+              outgoingCall
+            }
           >
             Call
           </button>
