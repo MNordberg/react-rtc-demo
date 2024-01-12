@@ -14,6 +14,7 @@ function App() {
   const localStream = useRef();
   const localVideo = useRef();
   const remoteVideo = useRef();
+  const readyInterval = useRef();
 
   const pc = useRef();
   const hub = useRef(
@@ -76,7 +77,9 @@ function App() {
     });
     localVideo.current.srcObject = localStream.current;
     setReady(true);
-    sendMessage("ready");
+    readyInterval.current = setInterval(() => {
+      sendMessage("ready");
+    }, 5000);
   }
 
   async function end(endedByMe) {
@@ -100,6 +103,7 @@ function App() {
     localStream.current = null;
     localVideo.current.srcObject = null;
     setReady(false);
+    clearInterval(readyInterval.current);
   }
 
   function createPeerConnection() {
